@@ -1,0 +1,12 @@
+.venv/
+.env
+gcp-key.json
+docs/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.qodo/
+.mypy_cache/
+.ruff_cache/
+data/csv/

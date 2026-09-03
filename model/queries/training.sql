@@ -1,0 +1,43 @@
+-- Train the Aayu shelf-life boosted-tree regressor.
+-- Predicts remaining_life_hours_at_retail from journey and damage features.
+--
+-- TRANSFORM() bakes preprocessing into the model so inference can never
+-- diverge from training (no manual scaling / one-hot lookups).
+
+CREATE OR REPLACE MODEL `aayu.shelf_life_model`
+TRANSFORM(
+  remaining_life_hours_at_retail,
+  ML.STANDARD_SCALER(age_hours_at_retail)                OVER () AS age_h,
+  ML.STANDARD_SCALER(transit_hours)                      OVER () AS transit_h,
+  ML.STANDARD_SCALER(warehouse_dwell_hours)              OVER () AS warehouse_h,
+  ML.STANDARD_SCALER(cumulative_thermal_exposure)        OVER () AS cum_therm,
+  ML.STANDARD_SCALER(hours_above_humidity_max)           OVER () AS hum_h,
+  ML.STANDARD_SCALER(max_temp_excursion_c)               OVER () AS max_exc_c,
+  ML.STANDARD_SCALER(longest_excursion_hours)            OVER () AS long_exc_h,
+  ML.STANDARD_SCALER(CAST(nominal_shelf_life_hours AS FLOAT64)) OVER () AS nominal_h,
+  product_type
+)
+OPTIONS(
+  model_type              = 'BOOSTED_TREE_REGRESSOR',
+  input_label_cols        = ['remaining_life_hours_at_retail'],
+  data_split_method       = 'AUTO_SPLIT',
+  num_parallel_tree       = 1,
+  max_tree_depth          = 6,
+  learn_rate              = 0.1,
+  min_split_loss          = 0.0,
+  subsample               = 0.85,
+  early_stop              = TRUE,
+  min_rel_progress        = 0.005
+) AS
+SELECT
+  remaining_life_hours_at_retail,
+  age_hours_at_retail,
+  transit_hours,
+  warehouse_dwell_hours,
+  cumulative_thermal_exposure,
+  hours_above_humidity_max,
+  max_temp_excursion_c,
+  longest_excursion_hours,
+  nominal_shelf_life_hours,
+  product_type
+FROM `aayu.v_batch_features`;
