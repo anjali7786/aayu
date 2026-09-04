@@ -1,0 +1,116 @@
+sources:
+  aayu-bq:
+    kind: bigquery
+    project: aayu-506916
+
+tools:
+
+  get-batch-features:
+    kind: bigquery-sql
+    source: aayu-bq
+    description: >
+      Fetch the aggregated feature row for one batch from aayu.v_batch_features.
+      Returns product info (type, shelf life, safe temp/humidity), journey timings
+      (age at retail, transit hours, warehouse dwell) and damage aggregates
+      (cumulative thermal exposure, longest excursion hours, max excursion peak).
+      Use this when you need to understand what happened to a batch during its journey.
+    parameters:
+      - name: batch_id
+        type: string
+        description: The batch identifier, e.g. "b_0001".
+    statement: |
+      SELECT
+        batch_id,
+        product_type,
+        nominal_shelf_life_hours,
+        temp_max_c,
+        humidity_max_pct,
+        manufacture_ts,
+        retail_in_ts,
+        age_hours_at_retail,
+        transit_hours,
+        warehouse_dwell_hours,
+        cumulative_thermal_exposure,
+        hours_above_humidity_max,
+        max_temp_excursion_c,
+        longest_excursion_hours,
+        remaining_life_hours_at_retail
+      FROM `aayu-506916.aayu.v_batch_features`
+      WHERE batch_id = @batch_id
+
+  get-batch-events:
+    kind: bigquery-sql
+    source: aayu-bq
+    description: >
+      Fetch the ordered journey events for one batch — dispatch, transit start,
+      transit end, warehouse in, warehouse out, retail in — each with a timestamp
+      and location. Use this when you need to describe when and where things
+      happened along the batch's journey.
+    parameters:
+      - name: batch_id
+        type: string
+        description: The batch identifier, e.g. "b_0001".
+    statement: |
+      SELECT event_type, ts, location
+      FROM `aayu-506916.aayu.events`
+      WHERE batch_id = @batch_id
+      ORDER BY ts
+
+  get-batch-telemetry-summary:
+    kind: bigquery-sql
+    source: aayu-bq
+    description: >
+      Fetch a summary of the raw temperature and humidity telemetry for one batch:
+      total readings, min/mean/max temperature, min/mean/max humidity, and
+      time range. Use this when you need at-a-glance environmental context
+      without pulling every 15-minute sample.
+    parameters:
+      - name: batch_id
+        type: string
+        description: The batch identifier, e.g. "b_0001".
+    statement: |
+      SELECT
+        COUNT(*)                     AS n_readings,
+        MIN(ts)                      AS first_ts,
+        MAX(ts)                      AS last_ts,
+        ROUND(MIN(temp_c), 2)        AS temp_min_c,
+        ROUND(AVG(temp_c), 2)        AS temp_mean_c,
+        ROUND(MAX(temp_c), 2)        AS temp_max_c,
+        ROUND(MIN(humidity_pct), 2)  AS humidity_min_pct,
+        ROUND(AVG(humidity_pct), 2)  AS humidity_mean_pct,
+        ROUND(MAX(humidity_pct), 2)  AS humidity_max_pct
+      FROM `aayu-506916.aayu.telemetry`
+      WHERE batch_id = @batch_id
+
+  predict-shelf-life:
+    kind: bigquery-sql
+    source: aayu-bq
+    description: >
+      Run the trained BQML shelf-life model on one batch and return the
+      predicted remaining life in hours, along with the ground-truth label
+      (available in this synthetic dataset) for comparison. Use this to get
+      the numeric shelf-life estimate a downstream decision agent should
+      interpret.
+    parameters:
+      - name: batch_id
+        type: string
+        description: The batch identifier, e.g. "b_0001".
+    statement: |
+      SELECT
+        p.batch_id,
+        p.product_type,
+        p.nominal_shelf_life_hours,
+        ROUND(pred.predicted_remaining_life_hours_at_retail, 2) AS predicted_remaining_life_hours,
+        ROUND(p.remaining_life_hours_at_retail, 2)              AS ground_truth_remaining_life_hours
+      FROM ML.PREDICT(
+        MODEL `aayu-506916.aayu.shelf_life_linear`,
+        (SELECT * FROM `aayu-506916.aayu.v_batch_features` WHERE batch_id = @batch_id)
+      ) AS pred
+      JOIN `aayu-506916.aayu.v_batch_features` p USING (batch_id)
+
+toolsets:
+  aayu:
+    - get-batch-features
+    - get-batch-events
+    - get-batch-telemetry-summary
+    - predict-shelf-life
