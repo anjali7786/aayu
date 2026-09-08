@@ -196,11 +196,22 @@ def lookup_by_barcode(req: BarcodeLookupRequest):
     "https://aayu.app/01/08901030855432/10/L26080501/17/260815" — to a batch_id
     plus product identity. Frontend calls this after a QR/barcode scan.
     """
-    sql = """
+    # Parse both GS1-128 (parenthesized) and GS1 Digital Link (URL) formats.
+    # Using COALESCE + two simple patterns instead of a lookahead — RE2 (BQ's
+    # regex engine) handles this more reliably than Python-style lookaheads.
+    sql = r"""
     WITH parsed AS (
       SELECT
-        REGEXP_EXTRACT(@scanned_code, r'(?:\\(01\\)|/01/)([0-9]{13,14})') AS gtin,
-        REGEXP_EXTRACT(@scanned_code, r'(?:\\(10\\)|/10/)([A-Za-z0-9]+?)(?=\\(|/|$)') AS lot_number
+        COALESCE(
+          REGEXP_EXTRACT(@scanned_code, r'\(01\)([0-9]{13,14})'),
+          REGEXP_EXTRACT(@scanned_code, r'/01/([0-9]{13,14})')
+        ) AS gtin,
+        COALESCE(
+          REGEXP_EXTRACT(@scanned_code, r'\(10\)([A-Za-z0-9]+?)\(17\)'),
+          REGEXP_EXTRACT(@scanned_code, r'/10/([A-Za-z0-9]+?)/17/'),
+          REGEXP_EXTRACT(@scanned_code, r'\(10\)([A-Za-z0-9]+)$'),
+          REGEXP_EXTRACT(@scanned_code, r'/10/([A-Za-z0-9]+)$')
+        ) AS lot_number
     )
     SELECT
       p.batch_id,

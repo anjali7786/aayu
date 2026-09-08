@@ -156,8 +156,16 @@ tools:
     statement: |
       WITH parsed AS (
         SELECT
-          REGEXP_EXTRACT(@scanned_code, r'(?:\(01\)|/01/)([0-9]{13,14})') AS gtin,
-          REGEXP_EXTRACT(@scanned_code, r'(?:\(10\)|/10/)([A-Za-z0-9]+?)(?=\(|/|$)') AS lot_number
+          COALESCE(
+            REGEXP_EXTRACT(@scanned_code, r'\(01\)([0-9]{13,14})'),
+            REGEXP_EXTRACT(@scanned_code, r'/01/([0-9]{13,14})')
+          ) AS gtin,
+          COALESCE(
+            REGEXP_EXTRACT(@scanned_code, r'\(10\)([A-Za-z0-9]+?)\(17\)'),
+            REGEXP_EXTRACT(@scanned_code, r'/10/([A-Za-z0-9]+?)/17/'),
+            REGEXP_EXTRACT(@scanned_code, r'\(10\)([A-Za-z0-9]+)$'),
+            REGEXP_EXTRACT(@scanned_code, r'/10/([A-Za-z0-9]+)$')
+          ) AS lot_number
       )
       SELECT
         p.batch_id,
