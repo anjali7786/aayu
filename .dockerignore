@@ -1,0 +1,21 @@
+.venv/
+.git/
+.idea/
+.qodo/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Not needed in the container
+docs/
+data/csv/
+bin/
+check/
+app/
+mcp/
+
+# Local secrets — must never enter the image
+.env
+gcp-key.json
