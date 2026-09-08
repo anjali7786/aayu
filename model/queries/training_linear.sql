@@ -9,7 +9,10 @@ TRANSFORM(
   ML.STANDARD_SCALER(max_temp_excursion_c)               OVER () AS max_exc_c,
   ML.STANDARD_SCALER(longest_excursion_hours)            OVER () AS long_exc_h,
   ML.STANDARD_SCALER(CAST(nominal_shelf_life_hours AS FLOAT64)) OVER () AS nominal_h,
-  product_type
+  -- Explicit one-hot for parity with the boosted-tree TRANSFORM. Linear regression
+  -- would auto-encode strings; making it explicit means both models share the exact
+  -- same feature representation and their comparison is apples-to-apples.
+  ML.ONE_HOT_ENCODER(product_type)                       OVER () AS product_type
 )
 OPTIONS(
   model_type = 'LINEAR_REG',

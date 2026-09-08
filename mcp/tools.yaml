@@ -108,9 +108,77 @@ tools:
       ) AS pred
       JOIN `aayu-506916.aayu.v_batch_features` p USING (batch_id)
 
+  lookup-batch-by-gtin-lot:
+    kind: bigquery-sql
+    source: aayu-bq
+    description: >
+      Given a product GTIN (Global Trade Item Number, 13-14 digits) and a lot
+      number, find the corresponding internal batch_id and return the product
+      metadata. Use this to translate a scanned barcode's identity fields into
+      Aayu's internal batch identifier before running any assessment.
+    parameters:
+      - name: gtin
+        type: string
+        description: The 13 or 14-digit Global Trade Item Number.
+      - name: lot_number
+        type: string
+        description: The batch lot code from the barcode's (10) segment.
+    statement: |
+      SELECT
+        batch_id,
+        product_type,
+        brand_name,
+        display_name,
+        gtin,
+        lot_number,
+        expiry_date,
+        manufacture_ts,
+        nominal_shelf_life_hours
+      FROM `aayu-506916.aayu.products`
+      WHERE gtin = @gtin AND lot_number = @lot_number
+      LIMIT 1
+
+  lookup-batch-by-scanned-code:
+    kind: bigquery-sql
+    source: aayu-bq
+    description: >
+      Given a raw scanned code string — either a GS1-128 element string like
+      "(01)08901030855432(10)L26080501(17)260815" or a GS1 Digital Link URL
+      like "https://aayu.app/01/08901030855432/10/L26080501/17/260815" — find
+      the matching Aayu batch. Uses regex to extract GTIN and lot. Returns
+      the batch_id plus product metadata.
+    parameters:
+      - name: scanned_code
+        type: string
+        description: >
+          The raw text decoded from a QR or barcode scanner. Accepts GS1-128
+          element strings or GS1 Digital Link URLs.
+    statement: |
+      WITH parsed AS (
+        SELECT
+          REGEXP_EXTRACT(@scanned_code, r'(?:\(01\)|/01/)([0-9]{13,14})') AS gtin,
+          REGEXP_EXTRACT(@scanned_code, r'(?:\(10\)|/10/)([A-Za-z0-9]+?)(?=\(|/|$)') AS lot_number
+      )
+      SELECT
+        p.batch_id,
+        p.product_type,
+        p.brand_name,
+        p.display_name,
+        p.gtin,
+        p.lot_number,
+        p.expiry_date,
+        p.manufacture_ts,
+        p.nominal_shelf_life_hours
+      FROM `aayu-506916.aayu.products` p
+      JOIN parsed pa
+        ON p.gtin = pa.gtin AND p.lot_number = pa.lot_number
+      LIMIT 1
+
 toolsets:
   aayu:
     - get-batch-features
     - get-batch-events
     - get-batch-telemetry-summary
     - predict-shelf-life
+    - lookup-batch-by-gtin-lot
+    - lookup-batch-by-scanned-code

@@ -66,6 +66,13 @@ temp_excursion_runs AS (
 SELECT
   p.batch_id,
   p.product_type,
+  p.brand_name,
+  p.display_name,
+  p.gtin,
+  p.lot_number,
+  p.expiry_date,
+  p.gs1_barcode,
+  p.gs1_digital_link,
   p.nominal_shelf_life_hours,
   p.temp_max_c,
   p.humidity_max_pct,

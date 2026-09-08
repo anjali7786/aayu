@@ -4,7 +4,7 @@
 -- TRANSFORM() bakes preprocessing into the model so inference can never
 -- diverge from training (no manual scaling / one-hot lookups).
 
-CREATE OR REPLACE MODEL `aayu.shelf_life_model`
+CREATE OR REPLACE MODEL `aayu.shelf_life_boosted_tree`
 TRANSFORM(
   remaining_life_hours_at_retail,
   ML.STANDARD_SCALER(age_hours_at_retail)                OVER () AS age_h,
@@ -15,7 +15,10 @@ TRANSFORM(
   ML.STANDARD_SCALER(max_temp_excursion_c)               OVER () AS max_exc_c,
   ML.STANDARD_SCALER(longest_excursion_hours)            OVER () AS long_exc_h,
   ML.STANDARD_SCALER(CAST(nominal_shelf_life_hours AS FLOAT64)) OVER () AS nominal_h,
-  product_type
+  -- Explicit one-hot for the categorical. Boosted trees in BQML do not auto-encode
+  -- string features inside TRANSFORM(), so without this the tree ignores product_type
+  -- entirely (feature importance = 0).
+  ML.ONE_HOT_ENCODER(product_type)                       OVER () AS product_type
 )
 OPTIONS(
   model_type              = 'BOOSTED_TREE_REGRESSOR',

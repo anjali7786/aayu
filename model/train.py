@@ -24,21 +24,27 @@ def run_sql_file(client: bigquery.Client, filename: str) -> bigquery.QueryJob:
 def main() -> None:
     client = bigquery.Client()
 
-    print("training model (~1-2 min)...")
-    # run_sql_file(client, "queries/training.sql").result()
+    print("training boosted-tree model (~1-2 min)...")
+    run_sql_file(client, "queries/training.sql").result()
+    print("  boosted tree trained.\n")
+
+    print("training linear model (~30 sec)...")
     run_sql_file(client, "queries/training_linear.sql").result()
+    print("  linear model trained.\n")
 
-    print("  training complete.\n")
+    # Evaluate both against their own held-out sets
+    for model_name in ("shelf_life_boosted_tree", "shelf_life_linear"):
+        print(f"=== {model_name} ===")
+        sql = f"SELECT * FROM ML.EVALUATE(MODEL `aayu.{model_name}`)"
+        for row in client.query(sql).result():
+            for k, v in row.items():
+                if isinstance(v, float):
+                    print(f"  {k:30} {v:>10.3f}")
+                else:
+                    print(f"  {k:30} {v!s:>10}")
+        print()
 
-    print("evaluation metrics:")
-    for row in run_sql_file(client, "queries/evaluate.sql").result():
-        for k, v in row.items():
-            if isinstance(v, float):
-                print(f"  {k:30} {v:>10.3f}")
-            else:
-                print(f"  {k:30} {v!s:>10}")
-
-    print("\nfeature importance:")
+    print("feature importance (boosted tree):")
     for row in run_sql_file(client, "queries/feature_importance.sql").result():
         print(f"  {row['feature']:35} weight={row['importance_weight']:>8.2f}")
 

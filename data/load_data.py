@@ -26,11 +26,18 @@ SCHEMAS = {
     "products": [
         bigquery.SchemaField("batch_id", "STRING", mode="REQUIRED"),
         bigquery.SchemaField("product_type", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("brand_name", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("display_name", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("gtin", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("lot_number", "STRING", mode="REQUIRED"),
         bigquery.SchemaField("manufacture_ts", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("expiry_date", "DATE", mode="REQUIRED"),
         bigquery.SchemaField("nominal_shelf_life_hours", "INT64", mode="REQUIRED"),
         bigquery.SchemaField("temp_min_c", "FLOAT64", mode="REQUIRED"),
         bigquery.SchemaField("temp_max_c", "FLOAT64", mode="REQUIRED"),
         bigquery.SchemaField("humidity_max_pct", "FLOAT64", mode="REQUIRED"),
+        bigquery.SchemaField("gs1_barcode", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("gs1_digital_link", "STRING", mode="REQUIRED"),
     ],
     "events": [
         bigquery.SchemaField("batch_id", "STRING", mode="REQUIRED"),

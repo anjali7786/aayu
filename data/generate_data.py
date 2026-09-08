@@ -17,16 +17,165 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # ---- config ----
-N_BATCHES = 200
+N_BATCHES = 500
 SEED = 42
 TELEMETRY_INTERVAL_MIN = 15
 CSV_DIR = Path(__file__).parent / "csv"
 
 PRODUCTS = {
-    "pasteurized_milk": {"shelf_life_hours": 240, "temp_min": 0, "temp_max": 4, "humidity_max": 85},
-    "yogurt": {"shelf_life_hours": 336, "temp_min": 2, "temp_max": 5, "humidity_max": 85},
-    "leafy_greens": {"shelf_life_hours": 168, "temp_min": 1, "temp_max": 4, "humidity_max": 95},
+    # 10 perishable categories with realistic Indian-market GTINs (089 prefix).
+    # `k_thermal` and `k_excursion_sq` are per-product damage coefficients — dairy
+    # tolerates warmth better than fresh meat; leafy greens are humidity-sensitive.
+    # These GTINs are for synthetic Aayu test products, not tied to any real brand.
+    "pasteurized_milk": {
+        "shelf_life_hours": 240,
+        "temp_min": 0,
+        "temp_max": 4,
+        "humidity_max": 85,
+        "k_thermal": 0.6,
+        "k_humidity": 0.05,
+        "k_excursion_sq": 0.8,
+        "gtin": "08901030855432",
+        "brand_name": "Aayu Test Dairy",
+        "display_name": "Pasteurized Toned Milk 1L",
+    },
+    "yogurt": {
+        "shelf_life_hours": 336,
+        "temp_min": 2,
+        "temp_max": 5,
+        "humidity_max": 85,
+        "k_thermal": 0.5,
+        "k_humidity": 0.04,
+        "k_excursion_sq": 0.7,
+        "gtin": "08901030871234",
+        "brand_name": "Aayu Test Dairy",
+        "display_name": "Set Yogurt 400g",
+    },
+    "paneer": {
+        "shelf_life_hours": 168,
+        "temp_min": 1,
+        "temp_max": 4,
+        "humidity_max": 85,
+        "k_thermal": 0.9,
+        "k_humidity": 0.08,
+        "k_excursion_sq": 1.1,
+        "gtin": "08901030892103",
+        "brand_name": "Aayu Test Dairy",
+        "display_name": "Fresh Paneer 200g",
+    },
+    "leafy_greens": {
+        "shelf_life_hours": 168,
+        "temp_min": 1,
+        "temp_max": 4,
+        "humidity_max": 95,
+        "k_thermal": 1.2,
+        "k_humidity": 0.15,
+        "k_excursion_sq": 1.5,
+        "gtin": "08901030889012",
+        "brand_name": "Aayu Test Farms",
+        "display_name": "Baby Spinach 200g",
+    },
+    "berries": {
+        "shelf_life_hours": 120,
+        "temp_min": 0,
+        "temp_max": 3,
+        "humidity_max": 90,
+        "k_thermal": 1.8,
+        "k_humidity": 0.20,
+        "k_excursion_sq": 2.0,
+        "gtin": "08901030903456",
+        "brand_name": "Aayu Test Farms",
+        "display_name": "Fresh Strawberries 250g",
+    },
+    "chicken_breast": {
+        "shelf_life_hours": 96,
+        "temp_min": -1,
+        "temp_max": 2,
+        "humidity_max": 80,
+        "k_thermal": 2.5,
+        "k_humidity": 0.10,
+        "k_excursion_sq": 3.0,
+        "gtin": "08901030918765",
+        "brand_name": "Aayu Test Meats",
+        "display_name": "Chicken Breast Boneless 500g",
+    },
+    "atlantic_salmon": {
+        "shelf_life_hours": 72,
+        "temp_min": -1,
+        "temp_max": 2,
+        "humidity_max": 80,
+        "k_thermal": 3.0,
+        "k_humidity": 0.12,
+        "k_excursion_sq": 3.8,
+        "gtin": "08901030924567",
+        "brand_name": "Aayu Test Seafood",
+        "display_name": "Atlantic Salmon Fillet 300g",
+    },
+    "orange_juice": {
+        "shelf_life_hours": 480,
+        "temp_min": 0,
+        "temp_max": 6,
+        "humidity_max": 75,
+        "k_thermal": 0.3,
+        "k_humidity": 0.02,
+        "k_excursion_sq": 0.4,
+        "gtin": "08901030935678",
+        "brand_name": "Aayu Test Beverages",
+        "display_name": "Fresh Orange Juice 1L",
+    },
+    "deli_ham": {
+        "shelf_life_hours": 336,
+        "temp_min": 1,
+        "temp_max": 4,
+        "humidity_max": 80,
+        "k_thermal": 1.5,
+        "k_humidity": 0.08,
+        "k_excursion_sq": 1.9,
+        "gtin": "08901030946789",
+        "brand_name": "Aayu Test Meats",
+        "display_name": "Sliced Deli Ham 200g",
+    },
+    "cottage_cheese": {
+        "shelf_life_hours": 168,
+        "temp_min": 1,
+        "temp_max": 4,
+        "humidity_max": 85,
+        "k_thermal": 1.0,
+        "k_humidity": 0.06,
+        "k_excursion_sq": 1.2,
+        "gtin": "08901030957890",
+        "brand_name": "Aayu Test Dairy",
+        "display_name": "Cottage Cheese 300g",
+    },
 }
+
+
+def build_lot_number(manufacture_ts: datetime, batch_id: str) -> str:
+    """
+    Realistic lot number: L + YYMMDD + last 2 chars of batch_id.
+    e.g. batch b_0001 manufactured 2026-08-05 -> "L26080501"
+    """
+    return "L" + manufacture_ts.strftime("%y%m%d") + batch_id[-2:]
+
+
+def build_gs1_barcode(gtin: str, lot: str, expiry: datetime) -> str:
+    """
+    GS1-128 element string. Application Identifiers:
+      (01) GTIN, (10) Lot, (17) Expiry YYMMDD.
+    Example: "(01)08901030855432(10)L26080501(17)260815"
+    Real scanners return this exact format; parsers strip the parentheses.
+    """
+    return f"(01){gtin}(10){lot}(17){expiry.strftime('%y%m%d')}"
+
+
+def build_gs1_digital_link(gtin: str, lot: str, expiry: datetime) -> str:
+    """
+    GS1 Digital Link — a URL form of the same identifiers, encoded in a QR.
+    Example: "https://aayu.app/01/08901030855432/10/L26080501/17/260815"
+    Modern retail is moving to this format.
+    """
+    return f"https://aayu.app/01/{gtin}/10/{lot}/17/{expiry.strftime('%y%m%d')}"
+
 
 # ---- events ----
 EVENT_COLUMNS = ["batch_id", "event_type", "ts", "location"]
@@ -135,11 +284,18 @@ def main() -> None:
 PRODUCT_COLUMNS = [
     "batch_id",
     "product_type",
+    "brand_name",
+    "display_name",
+    "gtin",
+    "lot_number",
     "manufacture_ts",
+    "expiry_date",
     "nominal_shelf_life_hours",
     "temp_min_c",
     "temp_max_c",
     "humidity_max_pct",
+    "gs1_barcode",
+    "gs1_digital_link",
 ]
 
 
@@ -169,15 +325,26 @@ def generate_products() -> list[dict]:
             manufacture_ts = base_ts + timedelta(hours=random.randint(0, 24 * 7))
 
         profile = PRODUCTS[product_type]
+        lot_number = build_lot_number(manufacture_ts, batch_id)
+        expiry_date = manufacture_ts + timedelta(hours=profile["shelf_life_hours"])
+        gtin = profile["gtin"]
+
         products.append(
             {
-                "batch_id": f"b_{i:04d}",
+                "batch_id": batch_id,
                 "product_type": product_type,
+                "brand_name": profile["brand_name"],
+                "display_name": profile["display_name"],
+                "gtin": gtin,
+                "lot_number": lot_number,
                 "manufacture_ts": manufacture_ts.isoformat(),
+                "expiry_date": expiry_date.date().isoformat(),
                 "nominal_shelf_life_hours": profile["shelf_life_hours"],
                 "temp_min_c": profile["temp_min"],
                 "temp_max_c": profile["temp_max"],
                 "humidity_max_pct": profile["humidity_max"],
+                "gs1_barcode": build_gs1_barcode(gtin, lot_number, expiry_date),
+                "gs1_digital_link": build_gs1_digital_link(gtin, lot_number, expiry_date),
             }
         )
 
@@ -411,12 +578,19 @@ def compute_ground_truth_for_batch(
         if humidity > humidity_max:
             hours_above_humidity_max += step_hours
 
+    # Per-product damage coefficients. Falls back to module defaults for products
+    # in the CSV that don't have their own values (backward compat).
+    profile = PRODUCTS.get(product["product_type"], {})
+    k_thermal = profile.get("k_thermal", K_THERMAL)
+    k_humidity = profile.get("k_humidity", K_HUMIDITY)
+    k_excursion_sq = profile.get("k_excursion_sq", K_EXCURSION_SQ)
+
     remaining = (
         nominal
         - age_hours
-        - K_THERMAL * cumulative_thermal_exposure
-        - K_HUMIDITY * hours_above_humidity_max
-        - K_EXCURSION_SQ * (longest_excursion_hours**2)
+        - k_thermal * cumulative_thermal_exposure
+        - k_humidity * hours_above_humidity_max
+        - k_excursion_sq * (longest_excursion_hours**2)
         + random.gauss(0, GROUND_TRUTH_NOISE_STD)
     )
     remaining = max(remaining, GROUND_TRUTH_FLOOR_HOURS)
