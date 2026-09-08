@@ -73,6 +73,45 @@ def _strip_json_fences(text: str) -> dict | str:
         return text  # give raw text back if it wasn't JSON
 
 
+def _bqml_prediction(batch_id: str) -> dict | None:
+    """
+    Direct BQML prediction — bypasses the LLM. The Shelf-Life Analyst agent
+    occasionally hallucinates or adjusts the tool output; this reads BQML's
+    output straight from the model to guarantee the displayed number is what
+    the model actually predicted.
+    """
+    sql = """
+    SELECT
+      ROUND(pred.predicted_remaining_life_hours_at_retail, 2) AS predicted,
+      ROUND(f.remaining_life_hours_at_retail, 2) AS ground_truth,
+      f.nominal_shelf_life_hours AS nominal
+    FROM ML.PREDICT(
+      MODEL `aayu.shelf_life_linear`,
+      (SELECT * FROM `aayu.v_batch_features` WHERE batch_id = @batch_id)
+    ) pred
+    JOIN `aayu.v_batch_features` f USING (batch_id)
+    """
+    try:
+        job = _bq.query(
+            sql,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("batch_id", "STRING", batch_id)]
+            ),
+        )
+        rows = list(job.result())
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "predicted": float(r["predicted"]),
+            "ground_truth": float(r["ground_truth"]),
+            "nominal": int(r["nominal"]),
+        }
+    except Exception as e:
+        print(f"[warn] direct BQML query failed for {batch_id}: {e}")
+        return None
+
+
 # ---- endpoints ----
 @app.get("/health")
 def health():
@@ -172,6 +211,20 @@ async def get_assessment(batch_id: str):
         "decision": _strip_json_fences(session.state.get("decision", "")),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Override the agent's numeric fields with the direct BQML prediction.
+    # The Shelf-Life Analyst LLM sometimes adjusts or rounds the tool's output;
+    # for displayed numbers we bypass the agent and read BQML directly so the
+    # frontend gets the model's true prediction. The agent's narrative fields
+    # (interpretation, confidence) are preserved.
+    bqml = _bqml_prediction(batch_id)
+    if bqml is not None:
+        sla = result.get("shelf_life_analysis")
+        if isinstance(sla, dict):
+            sla["predicted_remaining_hours"] = bqml["predicted"]
+            sla["ground_truth_remaining_hours"] = bqml["ground_truth"]
+            sla["pct_of_nominal"] = round(bqml["predicted"] / bqml["nominal"] * 100, 2)
+            sla["source"] = "bqml_direct"
 
     # audit to Firestore (best-effort — never fail the request over audit)
     try:
