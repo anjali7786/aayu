@@ -1,7 +1,14 @@
 """
-Train the Aayu BQML shelf-life model, then print evaluation and feature importance.
+Train the Aayu BQML shelf-life models, evaluate them, and persist prediction-
+interval calibration.
 
-Training takes ~1-2 minutes.
+Sequence:
+  1. Train boosted-tree regressor (~1-2 min)
+  2. Train linear regressor with interaction features (~30 sec)
+  3. Evaluate both against their own held-out sets
+  4. Compute residual statistics on the linear model and persist to aayu.model_calibration
+     so the API can serve 80% / 90% prediction intervals without recomputing residuals.
+  5. Print feature importance for the boosted tree
 """
 
 from pathlib import Path
@@ -28,7 +35,7 @@ def main() -> None:
     run_sql_file(client, "queries/training.sql").result()
     print("  boosted tree trained.\n")
 
-    print("training linear model (~30 sec)...")
+    print("training linear model with interaction features (~30 sec)...")
     run_sql_file(client, "queries/training_linear.sql").result()
     print("  linear model trained.\n")
 
@@ -43,6 +50,15 @@ def main() -> None:
                 else:
                     print(f"  {k:30} {v!s:>10}")
         print()
+
+    print("computing prediction-interval calibration for shelf_life_linear...")
+    run_sql_file(client, "queries/save_prediction_interval.sql").result()
+    for row in client.query("SELECT * FROM `aayu.model_calibration`").result():
+        print(f"  mae            = {row['mae']:.2f}h")
+        print(f"  sigma          = {row['sigma']:.2f}h")
+        print(f"  80% interval   = ±{row['p80_abs_error']:.2f}h (empirical)")
+        print(f"  90% interval   = ±{row['p90_abs_error']:.2f}h (empirical)")
+    print()
 
     print("feature importance (boosted tree):")
     for row in run_sql_file(client, "queries/feature_importance.sql").result():
