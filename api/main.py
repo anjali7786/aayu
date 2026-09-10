@@ -26,7 +26,7 @@ truststore.inject_into_ssl()
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -310,8 +310,48 @@ def get_telemetry(batch_id: str):
     return [dict(r) for r in job.result()]
 
 
+ASSESSMENT_CACHE_TTL = timedelta(hours=1)
+
+
+def _cached_assessment(batch_id: str) -> dict | None:
+    """
+    Return the most recent Firestore-cached assessment for this batch if it is
+    younger than ASSESSMENT_CACHE_TTL. Agent runs are expensive (~15-30s) and
+    per-batch state does not change during a demo session, so serving from
+    cache turns the second view of the same batch into an instant response.
+    Best-effort — any Firestore error just skips the cache.
+    """
+    try:
+        cutoff = datetime.now(timezone.utc) - ASSESSMENT_CACHE_TTL
+        docs = list(
+            _fs.collection("decisions")
+            .where("batch_id", "==", batch_id)
+            .order_by("generated_at", direction=firestore.Query.DESCENDING)
+            .limit(1)
+            .stream()
+        )
+        if not docs:
+            return None
+        cached = docs[0].to_dict()
+        generated_at_str = cached.get("generated_at")
+        if not generated_at_str:
+            return None
+        # Firestore stores ISO string; parse back for comparison.
+        try:
+            generated_at = datetime.fromisoformat(generated_at_str)
+        except ValueError:
+            return None
+        if generated_at < cutoff:
+            return None
+        cached["cache_hit"] = True
+        return cached
+    except Exception as e:
+        print(f"[warn] assessment cache lookup failed for {batch_id}: {e}")
+        return None
+
+
 @app.post("/batches/{batch_id}/assessment")
-async def get_assessment(batch_id: str):
+async def get_assessment(batch_id: str, fresh: bool = False):
     """
     Run the ADK 3-agent orchestrator on the given batch.
     Returns exposure_summary, shelf_life_analysis, decision.
@@ -320,7 +360,16 @@ async def get_assessment(batch_id: str):
     Resilience: if the ADK/MCP/LLM stack fails (agent errors, MCP unreachable,
     Vertex quota), fall back to a deterministic rule-based decision from BQML
     output. The frontend never sees a 500 from this endpoint.
+
+    Caching: results are cached in Firestore for ASSESSMENT_CACHE_TTL (1 hour).
+    Pass ?fresh=true to bypass the cache and force a new agent run.
     """
+    # Cache lookup — same batch, recent enough, no explicit bypass.
+    if not fresh:
+        cached = _cached_assessment(batch_id)
+        if cached is not None:
+            return cached
+
     generated_at = datetime.now(timezone.utc).isoformat()
 
     # Always precompute the BQML prediction — it's the source of truth for numbers
