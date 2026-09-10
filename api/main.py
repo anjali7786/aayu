@@ -79,12 +79,18 @@ def _bqml_prediction(batch_id: str) -> dict | None:
     occasionally hallucinates or adjusts the tool output; this reads BQML's
     output straight from the model to guarantee the displayed number is what
     the model actually predicted.
+
+    Returns both `predicted` (clamped to printed expiry — what the UI shows)
+    and `predicted_raw` (unclamped — used for drift monitoring). An operator
+    would never trust "Aayu says it lasts longer than the printed label", so
+    the clamp is applied server-side as a hard product invariant.
     """
     sql = """
     SELECT
-      ROUND(pred.predicted_remaining_life_hours_at_retail, 2) AS predicted,
+      ROUND(pred.predicted_remaining_life_hours_at_retail, 2) AS predicted_raw,
       ROUND(f.remaining_life_hours_at_retail, 2) AS ground_truth,
-      f.nominal_shelf_life_hours AS nominal
+      f.nominal_shelf_life_hours AS nominal,
+      ROUND(f.printed_remaining_life_hours, 2) AS printed_remaining
     FROM ML.PREDICT(
       MODEL `aayu.shelf_life_linear`,
       (SELECT * FROM `aayu.v_batch_features` WHERE batch_id = @batch_id)
@@ -102,10 +108,22 @@ def _bqml_prediction(batch_id: str) -> dict | None:
         if not rows:
             return None
         r = rows[0]
+        predicted_raw = float(r["predicted_raw"])
+        printed_remaining = (
+            float(r["printed_remaining"]) if r["printed_remaining"] is not None else None
+        )
+        # Server-side clamp: hard invariant that Aayu never claims more life than printed.
+        predicted_clamped = (
+            min(predicted_raw, printed_remaining)
+            if printed_remaining is not None
+            else predicted_raw
+        )
         return {
-            "predicted": float(r["predicted"]),
+            "predicted": round(predicted_clamped, 2),
+            "predicted_raw": round(predicted_raw, 2),
             "ground_truth": float(r["ground_truth"]),
             "nominal": int(r["nominal"]),
+            "printed_remaining": printed_remaining,
         }
     except Exception as e:
         print(f"[warn] direct BQML query failed for {batch_id}: {e}")
@@ -221,9 +239,11 @@ async def get_assessment(batch_id: str):
     if bqml is not None:
         sla = result.get("shelf_life_analysis")
         if isinstance(sla, dict):
-            sla["predicted_remaining_hours"] = bqml["predicted"]
+            sla["predicted_remaining_hours"] = bqml["predicted"]  # clamped
+            sla["predicted_raw"] = bqml["predicted_raw"]  # unclamped
             sla["ground_truth_remaining_hours"] = bqml["ground_truth"]
             sla["pct_of_nominal"] = round(bqml["predicted"] / bqml["nominal"] * 100, 2)
+            sla["printed_remaining_hours"] = bqml["printed_remaining"]
             sla["source"] = "bqml_direct"
 
     # audit to Firestore (best-effort — never fail the request over audit)

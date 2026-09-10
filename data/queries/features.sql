@@ -90,6 +90,14 @@ SELECT
   COALESCE(a.max_temp_excursion_c, 0)          AS max_temp_excursion_c,
   COALESCE(e.longest_excursion_hours, 0)       AS longest_excursion_hours,
 
+  -- Printed-expiry ceiling: hours between retail arrival and the stamped expiry date.
+  -- The Aayu prediction should never exceed this (an operator would never trust
+  -- "Aayu says it lasts longer than the label"). Backend clamps to this value.
+  GREATEST(
+    TIMESTAMP_DIFF(TIMESTAMP(p.expiry_date), j.retail_in_ts, SECOND) / 3600.0,
+    0
+  ) AS printed_remaining_life_hours,
+
   -- Training label
   g.remaining_life_hours_at_retail
 FROM `aayu.products` p

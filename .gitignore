@@ -11,3 +11,8 @@ __pycache__/
 .ruff_cache/
 data/csv/
 bin/
+check/
+*.zip
+node_modules/
+aayu-fe/dist/
+aayu-fe/node_modules/
