@@ -52,7 +52,7 @@ SELECT
   longest_excursion_hours,
   nominal_shelf_life_hours,
   product_type,
-  cumulative_thermal_exposure * age_hours_at_retail                                 AS thermal_x_time,
-  max_temp_excursion_c * max_temp_excursion_c                                       AS excursion_squared,
-  cumulative_thermal_exposure * transit_hours                                       AS thermal_x_transit
+  thermal_x_time,
+  excursion_squared,
+  thermal_x_transit
 FROM `aayu.v_batch_features`;

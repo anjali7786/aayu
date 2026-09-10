@@ -90,6 +90,16 @@ SELECT
   COALESCE(a.max_temp_excursion_c, 0)          AS max_temp_excursion_c,
   COALESCE(e.longest_excursion_hours, 0)       AS longest_excursion_hours,
 
+  -- Interaction features (physics-motivated) — baked into the view so ML.PREDICT
+  -- can read them directly without recomputation, keeping training and serving
+  -- from a single source of truth.
+  COALESCE(a.cumulative_thermal_exposure, 0)
+    * (TIMESTAMP_DIFF(j.retail_in_ts, p.manufacture_ts, SECOND) / 3600.0)         AS thermal_x_time,
+  COALESCE(a.max_temp_excursion_c, 0)
+    * COALESCE(a.max_temp_excursion_c, 0)                                          AS excursion_squared,
+  COALESCE(a.cumulative_thermal_exposure, 0)
+    * (TIMESTAMP_DIFF(j.transit_end_ts, j.transit_start_ts, SECOND) / 3600.0)      AS thermal_x_transit,
+
   -- Printed-expiry ceiling: hours between retail arrival and the stamped expiry date.
   -- The Aayu prediction should never exceed this (an operator would never trust
   -- "Aayu says it lasts longer than the label"). Backend clamps to this value.

@@ -37,10 +37,5 @@ SELECT
   cumulative_thermal_exposure, hours_above_humidity_max,
   max_temp_excursion_c, longest_excursion_hours,
   nominal_shelf_life_hours, product_type,
-  -- Damage compounds with exposure time -> thermal * age
-  cumulative_thermal_exposure * age_hours_at_retail                                 AS thermal_x_time,
-  -- Non-linear damage above safe threshold (Arrhenius-like)
-  max_temp_excursion_c * max_temp_excursion_c                                       AS excursion_squared,
-  -- Transit-phase damage is worse than warehouse-phase (less controlled)
-  cumulative_thermal_exposure * transit_hours                                       AS thermal_x_transit
+  thermal_x_time, excursion_squared, thermal_x_transit
 FROM `aayu.v_batch_features`;
