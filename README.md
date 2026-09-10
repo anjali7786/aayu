@@ -26,7 +26,7 @@ Aayu combines cold-chain telemetry, product characteristics, and Gemini reasonin
 
 ## Live demo
 
-- **Frontend**: *(add URL)*
+- **Frontend**: <https://aayu-shelf.ai.studio/>
 - **Backend API**: `https://aayu-api-241157484581.us-central1.run.app`
 - **MCP Toolbox**: `https://aayu-mcp-toolbox-241157484581.us-central1.run.app`
 
@@ -150,7 +150,7 @@ aayu/
 │   └── ablation.py
 ├── tests/                   # Fast pytest suite (no BQ/Vertex needed)
 │   └── test_invariants.py
-├── aayu-fe/                 # React frontend (generated via AI Studio Build)
+├── aayu-frontend-studio/    # React frontend (generated + deployed via AI Studio Build)
 ├── docs/
 │   ├── BUSINESS_CASE.md
 │   └── ABLATION.md

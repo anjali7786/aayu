@@ -44,7 +44,7 @@ from agents.orchestrator import aayu_orchestrator
 # ---- clients ----
 app = FastAPI(title="Aayu API", version="0.1.0")
 
-# CORS: allow the AI Studio frontend to call us. Widen for dev; tighten before prod.
+# CORS: allow the AI Studio aayu-frontend-studio to call us. Widen for dev; tighten before prod.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -372,7 +372,7 @@ async def get_assessment(batch_id: str, fresh: bool = False):
 
     Resilience: if the ADK/MCP/LLM stack fails (agent errors, MCP unreachable,
     Vertex quota), fall back to a deterministic rule-based decision from BQML
-    output. The frontend never sees a 500 from this endpoint.
+    output. The aayu-frontend-studio never sees a 500 from this endpoint.
 
     Caching: results are cached in Firestore for ASSESSMENT_CACHE_TTL (1 hour).
     Pass ?fresh=true to bypass the cache and force a new agent run.

@@ -109,14 +109,13 @@ def test_fallback_response_has_required_fields():
 
 
 # --- Invariant 3: barcode regex matches both GS1 formats ---
-# The frontend and backend rely on the same GS1-128 / Digital Link patterns.
+# The aayu-frontend-studio and backend rely on the same GS1-128 / Digital Link patterns.
 
 
 def test_barcode_url_fallback_extracts_batch_from_digital_link():
     import re
 
     url = "https://aayu.app/01/08901030855432/10/L26080501/17/260815"
-    # Same regex the frontend uses in api.ts
     match = re.match(r".*/batch(?:es)?/(b_\d{4})", url, re.IGNORECASE)
     assert match is None  # URL is a Digital Link, not a /batches/ URL — should not match
 

@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* HTML5 QR Code Scanner styling overrides */
+#aayu-qr-reader {
+  border: none !important;
+  width: 100% !important;
+  position: relative !important;
+  background-color: transparent !important;
+}
+
+#aayu-qr-reader video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  border-radius: 0.75rem !important;
+}
+
+#aayu-qr-reader #qr-shaded-region {
+  border-color: rgba(16, 185, 129, 0.5) !important;
+  border-radius: 0.5rem !important;
+}
+
+#aayu-qr-reader img[alt="Info icon"] {
+  display: none !important;
+}
+
+@keyframes scanLaser {
+  0% {
+    top: 15%;
+    opacity: 0.3;
+  }
+  50% {
+    top: 85%;
+    opacity: 1;
+  }
+  100% {
+    top: 15%;
+    opacity: 0.3;
+  }
+}
+
+.animate-laser {
+  animation: scanLaser 2.2s ease-in-out infinite;
+}

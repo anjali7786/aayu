@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function() {
+        try {
+          var target = typeof window !== 'undefined' ? window : globalThis;
+          if (target) {
+            var nativeFetch = target.fetch;
+            var currentFetch = typeof nativeFetch === 'function' ? nativeFetch.bind(target) : nativeFetch;
+            Object.defineProperty(target, 'fetch', {
+              get: function() {
+                return currentFetch;
+              },
+              set: function(fn) {
+                currentFetch = fn;
+              },
+              configurable: true,
+              enumerable: true
+            });
+          }
+        } catch (e) {
+          console.warn('[Aayu] Window fetch patch failed:', e);
+        }
+      })();
+    </script>
+    <title>Aayu</title>
+    <meta name="description" content="Perishable food batch shelf-life intelligence dashboard." />
+    <meta property="og:title" content="Aayu" />
+    <meta property="og:description" content="Perishable food batch shelf-life intelligence dashboard." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans antialiased selection:bg-slate-900 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
