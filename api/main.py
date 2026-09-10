@@ -86,16 +86,25 @@ def _bqml_prediction(batch_id: str) -> dict | None:
     the clamp is applied server-side as a hard product invariant.
     """
     sql = """
+    WITH cal AS (
+      SELECT p80_abs_error, p90_abs_error
+      FROM `aayu.model_calibration`
+      WHERE model_name = 'shelf_life_linear'
+      LIMIT 1
+    )
     SELECT
       ROUND(pred.predicted_remaining_life_hours_at_retail, 2) AS predicted_raw,
       ROUND(f.remaining_life_hours_at_retail, 2) AS ground_truth,
       f.nominal_shelf_life_hours AS nominal,
-      ROUND(f.printed_remaining_life_hours, 2) AS printed_remaining
+      ROUND(f.printed_remaining_life_hours, 2) AS printed_remaining,
+      cal.p80_abs_error,
+      cal.p90_abs_error
     FROM ML.PREDICT(
       MODEL `aayu.shelf_life_linear`,
       (SELECT * FROM `aayu.v_batch_features` WHERE batch_id = @batch_id)
     ) pred
     JOIN `aayu.v_batch_features` f USING (batch_id)
+    LEFT JOIN cal ON TRUE
     """
     try:
         job = _bq.query(
@@ -118,9 +127,21 @@ def _bqml_prediction(batch_id: str) -> dict | None:
             if printed_remaining is not None
             else predicted_raw
         )
+        # 80% empirical prediction interval, computed offline from training residuals.
+        # Falls back to None if aayu.model_calibration hasn't been populated yet.
+        p80 = float(r["p80_abs_error"]) if r["p80_abs_error"] is not None else None
+        interval_low = max(0.0, round(predicted_clamped - p80, 2)) if p80 is not None else None
+        interval_high = (
+            round(min(printed_remaining, predicted_clamped + p80), 2)
+            if p80 is not None and printed_remaining is not None
+            else (round(predicted_clamped + p80, 2) if p80 is not None else None)
+        )
         return {
             "predicted": round(predicted_clamped, 2),
             "predicted_raw": round(predicted_raw, 2),
+            "predicted_interval_low": interval_low,
+            "predicted_interval_high": interval_high,
+            "prediction_interval_pct": 80 if p80 is not None else None,
             "ground_truth": float(r["ground_truth"]),
             "nominal": int(r["nominal"]),
             "printed_remaining": printed_remaining,
@@ -189,6 +210,9 @@ def _rule_based_decision(bqml: dict, batch_row: dict | None) -> dict:
         "shelf_life_analysis": {
             "predicted_remaining_hours": bqml["predicted"],
             "predicted_raw": bqml["predicted_raw"],
+            "predicted_interval_low": bqml.get("predicted_interval_low"),
+            "predicted_interval_high": bqml.get("predicted_interval_high"),
+            "prediction_interval_pct": bqml.get("prediction_interval_pct"),
             "ground_truth_remaining_hours": bqml["ground_truth"],
             "pct_of_nominal": round(pct, 2),
             "printed_remaining_hours": bqml["printed_remaining"],
@@ -372,6 +396,9 @@ async def get_assessment(batch_id: str):
         if isinstance(sla, dict):
             sla["predicted_remaining_hours"] = bqml["predicted"]
             sla["predicted_raw"] = bqml["predicted_raw"]
+            sla["predicted_interval_low"] = bqml.get("predicted_interval_low")
+            sla["predicted_interval_high"] = bqml.get("predicted_interval_high")
+            sla["prediction_interval_pct"] = bqml.get("prediction_interval_pct")
             sla["ground_truth_remaining_hours"] = bqml["ground_truth"]
             sla["pct_of_nominal"] = round(bqml["predicted"] / bqml["nominal"] * 100, 2)
             sla["printed_remaining_hours"] = bqml["printed_remaining"]
