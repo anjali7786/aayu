@@ -11,17 +11,20 @@ the ground-truth remaining life and the actual predicted MAE. Output is a
 Markdown table suitable for pasting into the README, plus a summary block
 showing action-agreement across configs and per-config decision distribution.
 
+The full agent stack (Config C) is invoked against the DEPLOYED backend at
+$AAYU_API_URL (or the built-in default). This avoids duplicating credential +
+MCP wiring locally, and tests the same code path a real user would hit.
+
 Usage:
   python -m scripts.ablation [--n 20] [--output docs/ABLATION.md]
+                             [--api https://aayu-api-<...>.run.app]
 
-Runtime: ~2 min for N=20 (dominated by agent calls, ~5s each).
+Runtime: ~2 min for N=20 (dominated by HTTP calls to /assessment, ~5s each).
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import os
 from collections import Counter
 from pathlib import Path
@@ -30,17 +33,15 @@ import truststore
 
 truststore.inject_into_ssl()
 
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from google.adk.runners import InMemoryRunner
 from google.cloud import bigquery
-from google.genai import types
-
-from agents.orchestrator import aayu_orchestrator
 
 _bq = bigquery.Client()
+DEFAULT_API = "https://aayu-api-241157484581.us-central1.run.app"
 
 
 def _rules_only_decision(batch_row: dict) -> str:
@@ -95,28 +96,17 @@ def _bqml_plus_rules_decision(batch_id: str, batch_row: dict) -> tuple[str, floa
     return "Sell Normally", predicted
 
 
-async def _agent_decision(runner: InMemoryRunner, batch_id: str) -> str:
-    """Config C: full ADK orchestrator (Exposure -> Shelf-Life -> Decision)."""
-    session = await runner.session_service.create_session(app_name="aayu", user_id="ablation")
-    message = types.Content(role="user", parts=[types.Part(text=f"Assess batch_id={batch_id}")])
-    async for _ in runner.run_async(user_id="ablation", session_id=session.id, new_message=message):
-        pass
-    session = await runner.session_service.get_session(
-        app_name="aayu", user_id="ablation", session_id=session.id
-    )
-    decision = session.state.get("decision", "")
-    if isinstance(decision, str):
-        try:
-            stripped = decision.strip()
-            if stripped.startswith("```"):
-                lines = stripped.split("\n")
-                stripped = "\n".join(lines[1:-1]).strip()
-            decision = json.loads(stripped)
-        except Exception:
-            return "PARSE_ERROR"
-    return (
-        decision.get("recommended_action", "UNKNOWN") if isinstance(decision, dict) else "UNKNOWN"
-    )
+def _agent_decision(api_base: str, batch_id: str) -> tuple[str, str]:
+    """Config C: full ADK stack via the deployed /assessment endpoint.
+    Returns (action, mode) where mode is 'agent' or 'rule_based_fallback'.
+    """
+    url = f"{api_base.rstrip('/')}/batches/{batch_id}/assessment"
+    resp = requests.post(url, timeout=90)
+    resp.raise_for_status()
+    data = resp.json()
+    action = data.get("decision", {}).get("recommended_action", "UNKNOWN")
+    mode = data.get("mode", "unknown")
+    return action, mode
 
 
 def _load_sample_batches(n: int) -> list[dict]:
@@ -140,19 +130,20 @@ def _load_sample_batches(n: int) -> list[dict]:
     return [dict(r) for r in _bq.query(sql).result()]
 
 
-async def main() -> None:
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=20)
     parser.add_argument("--output", default="docs/ABLATION.md")
+    parser.add_argument("--api", default=os.environ.get("AAYU_API_URL", DEFAULT_API))
     args = parser.parse_args()
 
+    print(f"[ablation] hitting {args.api}")
     print(f"[ablation] loading {args.n} sample batches...")
     batches = _load_sample_batches(args.n)
     print(f"[ablation] got {len(batches)} batches. Running configs...\n")
 
-    runner = InMemoryRunner(agent=aayu_orchestrator, app_name="aayu")
-
     rows: list[dict] = []
+    agent_modes: Counter = Counter()
     for i, b in enumerate(batches, 1):
         batch_id = b["batch_id"]
         gt = float(b["remaining_life_hours_at_retail"])
@@ -161,10 +152,12 @@ async def main() -> None:
         a = _rules_only_decision(b)
         b_action, predicted = _bqml_plus_rules_decision(batch_id, b)
         try:
-            c = await _agent_decision(runner, batch_id)
+            c, mode = _agent_decision(args.api, batch_id)
+            agent_modes[mode] += 1
         except Exception as e:
             c = f"ERROR: {type(e).__name__}"
-            print(f"agent error: {e}")
+            mode = "error"
+            print(f"agent error: {e}", end=" ")
 
         err = predicted - gt
         rows.append(
@@ -176,11 +169,11 @@ async def main() -> None:
                 "rules_only": a,
                 "bqml_plus_rules": b_action,
                 "agent": c,
+                "agent_mode": mode,
             }
         )
         print("done.")
 
-    # Summary stats
     total = len(rows)
     mae = sum(r["abs_error_h"] for r in rows) / total
     agree_a_b = sum(1 for r in rows if r["rules_only"] == r["bqml_plus_rules"])
@@ -189,7 +182,6 @@ async def main() -> None:
     counter_b = Counter(r["bqml_plus_rules"] for r in rows)
     counter_c = Counter(r["agent"] for r in rows)
 
-    # Write markdown report
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w") as f:
@@ -208,7 +200,7 @@ async def main() -> None:
             "| **B. BQML + rules** | Same thresholds, but replace `printed_remaining` with the "
             "linear model's prediction. |\n"
             "| **C. Full agent stack** | ADK 3-agent orchestrator (Exposure Analyst → Shelf-Life "
-            "Analyst → Decision Agent) with BQML tool. |\n\n"
+            "Analyst → Decision Agent) via the deployed `/assessment` endpoint. |\n\n"
         )
         f.write("## Aggregate results\n\n")
         f.write(f"- **Mean absolute error (BQML)**: {mae:.2f}h across {total} batches\n")
@@ -220,9 +212,12 @@ async def main() -> None:
         f.write(
             f"- **B vs. C agreement**: {agree_b_c}/{total} "
             f"({agree_b_c/total*100:.0f}%) — LLM agent generally follows the same rule "
-            f"thresholds; when it diverges it's on borderline cases where narrative context helps\n\n"
+            f"thresholds; when it diverges it's on borderline cases where narrative context helps\n"
         )
-        f.write("## Decision distribution\n\n")
+        if agent_modes:
+            mode_str = ", ".join(f"`{k}`={v}" for k, v in agent_modes.most_common())
+            f.write(f"- **Agent mode breakdown**: {mode_str}\n")
+        f.write("\n## Decision distribution\n\n")
         f.write("| Action | A. Rules only | B. BQML + rules | C. Agent |\n|---|---|---|---|\n")
         actions = sorted(
             set(list(counter_a) + list(counter_b) + list(counter_c)),
@@ -232,28 +227,29 @@ async def main() -> None:
             f.write(
                 f"| {a} | {counter_a.get(a, 0)} | {counter_b.get(a, 0)} | {counter_c.get(a, 0)} |\n"
             )
-        f.write("\n")
-        f.write("## Per-batch decisions\n\n")
+        f.write("\n## Per-batch decisions\n\n")
         f.write(
-            "| Batch | Ground truth | BQML pred | Abs err | Rules only | BQML+rules | Agent |\n"
+            "| Batch | Ground truth | BQML pred | Abs err | Rules only | BQML+rules | Agent (mode) |\n"
         )
         f.write("|---|---:|---:|---:|---|---|---|\n")
         for r in rows:
             f.write(
                 f"| `{r['batch_id']}` | {r['ground_truth_h']:.1f}h | {r['predicted_h']:.1f}h | "
                 f"{r['abs_error_h']:.1f}h | {r['rules_only']} | {r['bqml_plus_rules']} | "
-                f"{r['agent']} |\n"
+                f"{r['agent']} ({r['agent_mode']}) |\n"
             )
         f.write("\n---\n")
         f.write(
-            "Generated by `python -m scripts.ablation --n {n}`. "
-            "This report is regenerated on each run; commit only when the underlying model "
-            "or agent instructions change.\n".format(n=args.n)
+            f"Generated by `python -m scripts.ablation --n {args.n} --api {args.api}`. "
+            "Regenerated on each run; commit only when the underlying model or agent "
+            "instructions change.\n"
         )
 
     print(f"\n[ablation] wrote report to {out}")
     print(f"[ablation] MAE={mae:.2f}h  A~B={agree_a_b}/{total}  B~C={agree_b_c}/{total}")
+    if agent_modes:
+        print(f"[ablation] agent modes: {dict(agent_modes)}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
