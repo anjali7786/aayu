@@ -130,6 +130,89 @@ def _bqml_prediction(batch_id: str) -> dict | None:
         return None
 
 
+def _rule_based_decision(bqml: dict, batch_row: dict | None) -> dict:
+    """
+    Deterministic fallback recommendation when the ADK/LLM stack is unavailable.
+    Uses the same thresholds as the Decision Agent's instruction, applied to the
+    BQML prediction + exposure signals from v_batch_features. This is the
+    guarantee that Aayu never returns 500 because an LLM died.
+    """
+    predicted = bqml["predicted"]
+    nominal = bqml["nominal"]
+    pct = (predicted / nominal * 100) if nominal else 0
+
+    peak_excursion = float(batch_row.get("max_temp_excursion_c", 0) or 0) if batch_row else 0
+    thermal_hours = float(batch_row.get("cumulative_thermal_exposure", 0) or 0) if batch_row else 0
+
+    if pct < 15 or peak_excursion > 8:
+        action = "Quarantine"
+    elif peak_excursion > 5 and pct > 30:
+        action = "Inspect"
+    elif pct < 30:
+        action = "Discount"
+    elif pct < 60:
+        action = "Prioritize Sale"
+    else:
+        action = "Sell Normally"
+
+    if peak_excursion > 0:
+        headline = (
+            f"Rule-based recommendation: {action}. Peak excursion {peak_excursion:.1f}°C "
+            f"and {thermal_hours:.1f}h of thermal exposure; model predicts {pct:.0f}% "
+            f"of nominal shelf life remaining."
+        )
+    else:
+        headline = (
+            f"Rule-based recommendation: {action}. Cold chain clean; model predicts "
+            f"{pct:.0f}% of nominal shelf life remaining."
+        )
+
+    return {
+        "exposure_summary": {
+            "risk_level": (
+                "severe" if peak_excursion > 8 else "moderate" if peak_excursion > 0 else "minimal"
+            ),
+            "primary_concern": "thermal_excursion" if peak_excursion > 0 else "none",
+            "key_events": (
+                [
+                    f"Peak excursion {peak_excursion:.1f}°C over max",
+                    f"{thermal_hours:.1f}h cumulative thermal exposure",
+                ]
+                if peak_excursion > 0
+                else ["No thermal excursion recorded"]
+            ),
+            "narrative": (
+                f"Cold-chain telemetry shows {'a peak excursion of ' + f'{peak_excursion:.1f}°C over the safe threshold' if peak_excursion > 0 else 'no excursions'}. "
+                f"Rule-based synthesis (LLM agents unavailable — fallback mode)."
+            ),
+        },
+        "shelf_life_analysis": {
+            "predicted_remaining_hours": bqml["predicted"],
+            "predicted_raw": bqml["predicted_raw"],
+            "ground_truth_remaining_hours": bqml["ground_truth"],
+            "pct_of_nominal": round(pct, 2),
+            "printed_remaining_hours": bqml["printed_remaining"],
+            "confidence": "medium",
+            "source": "bqml_direct",
+            "interpretation": (
+                f"BQML linear regression predicts {predicted:.1f}h remaining "
+                f"({pct:.0f}% of {nominal}h nominal). Fallback path — LLM narrative unavailable."
+            ),
+        },
+        "decision": {
+            "headline": headline,
+            "recommended_action": action,
+            "confidence": "medium",
+            "explanation": (
+                f"Deterministic rules applied: pct_of_nominal={pct:.1f}%, "
+                f"peak_excursion={peak_excursion:.1f}°C. "
+                f"LLM decision agent unavailable — this recommendation follows the "
+                f"same thresholds the agent uses."
+            ),
+        },
+    }
+
+
 # ---- endpoints ----
 @app.get("/health")
 def health():
@@ -209,38 +292,86 @@ async def get_assessment(batch_id: str):
     Run the ADK 3-agent orchestrator on the given batch.
     Returns exposure_summary, shelf_life_analysis, decision.
     Writes the decision to Firestore for audit.
+
+    Resilience: if the ADK/MCP/LLM stack fails (agent errors, MCP unreachable,
+    Vertex quota), fall back to a deterministic rule-based decision from BQML
+    output. The frontend never sees a 500 from this endpoint.
     """
-    session = await _runner.session_service.create_session(app_name="aayu", user_id="api")
-    message = types.Content(
-        role="user",
-        parts=[types.Part(text=f"Assess batch_id={batch_id}")],
-    )
-    async for _ in _runner.run_async(user_id="api", session_id=session.id, new_message=message):
-        pass  # events are consumed but we care about final state
+    generated_at = datetime.now(timezone.utc).isoformat()
 
-    session = await _runner.session_service.get_session(
-        app_name="aayu", user_id="api", session_id=session.id
-    )
-
-    result = {
-        "batch_id": batch_id,
-        "exposure_summary": _strip_json_fences(session.state.get("exposure_summary", "")),
-        "shelf_life_analysis": _strip_json_fences(session.state.get("shelf_life_analysis", "")),
-        "decision": _strip_json_fences(session.state.get("decision", "")),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    # Override the agent's numeric fields with the direct BQML prediction.
-    # The Shelf-Life Analyst LLM sometimes adjusts or rounds the tool's output;
-    # for displayed numbers we bypass the agent and read BQML directly so the
-    # frontend gets the model's true prediction. The agent's narrative fields
-    # (interpretation, confidence) are preserved.
+    # Always precompute the BQML prediction — it's the source of truth for numbers
+    # and the fallback data source.
     bqml = _bqml_prediction(batch_id)
-    if bqml is not None:
+    if bqml is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"batch {batch_id!r} has no BQML prediction available",
+        )
+
+    # Try the agent stack. On any failure, degrade to rule-based.
+    agent_result = None
+    agent_error: str | None = None
+    try:
+        session = await _runner.session_service.create_session(app_name="aayu", user_id="api")
+        message = types.Content(
+            role="user",
+            parts=[types.Part(text=f"Assess batch_id={batch_id}")],
+        )
+        async for _ in _runner.run_async(user_id="api", session_id=session.id, new_message=message):
+            pass
+
+        session = await _runner.session_service.get_session(
+            app_name="aayu", user_id="api", session_id=session.id
+        )
+        agent_result = {
+            "exposure_summary": _strip_json_fences(session.state.get("exposure_summary", "")),
+            "shelf_life_analysis": _strip_json_fences(session.state.get("shelf_life_analysis", "")),
+            "decision": _strip_json_fences(session.state.get("decision", "")),
+        }
+    except Exception as e:
+        agent_error = f"{type(e).__name__}: {e}"
+        print(f"[warn] ADK orchestrator failed for {batch_id}: {agent_error}")
+
+    if agent_result is None or not isinstance(agent_result.get("decision"), dict):
+        # Fallback: fetch batch features for exposure numbers and synthesize a rule-based response.
+        batch_row = None
+        try:
+            job = _bq.query(
+                "SELECT max_temp_excursion_c, cumulative_thermal_exposure FROM `aayu.v_batch_features` WHERE batch_id = @b",
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("b", "STRING", batch_id)]
+                ),
+            )
+            rows = list(job.result())
+            if rows:
+                batch_row = dict(rows[0])
+        except Exception as e:
+            print(f"[warn] fallback batch feature fetch failed: {e}")
+
+        fallback = _rule_based_decision(bqml, batch_row)
+        result = {
+            "batch_id": batch_id,
+            "exposure_summary": fallback["exposure_summary"],
+            "shelf_life_analysis": fallback["shelf_life_analysis"],
+            "decision": fallback["decision"],
+            "generated_at": generated_at,
+            "mode": "rule_based_fallback",
+            "agent_error": agent_error,
+        }
+    else:
+        # Happy path: agents ran; override numeric fields with direct BQML for integrity.
+        result = {
+            "batch_id": batch_id,
+            "exposure_summary": agent_result["exposure_summary"],
+            "shelf_life_analysis": agent_result["shelf_life_analysis"],
+            "decision": agent_result["decision"],
+            "generated_at": generated_at,
+            "mode": "agent",
+        }
         sla = result.get("shelf_life_analysis")
         if isinstance(sla, dict):
-            sla["predicted_remaining_hours"] = bqml["predicted"]  # clamped
-            sla["predicted_raw"] = bqml["predicted_raw"]  # unclamped
+            sla["predicted_remaining_hours"] = bqml["predicted"]
+            sla["predicted_raw"] = bqml["predicted_raw"]
             sla["ground_truth_remaining_hours"] = bqml["ground_truth"]
             sla["pct_of_nominal"] = round(bqml["predicted"] / bqml["nominal"] * 100, 2)
             sla["printed_remaining_hours"] = bqml["printed_remaining"]
