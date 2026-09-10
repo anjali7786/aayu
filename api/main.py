@@ -160,18 +160,31 @@ def _rule_based_decision(bqml: dict, batch_row: dict | None) -> dict:
     """
     predicted = bqml["predicted"]
     nominal = bqml["nominal"]
+    printed_remaining = bqml.get("printed_remaining")
     pct = (predicted / nominal * 100) if nominal else 0
 
     peak_excursion = float(batch_row.get("max_temp_excursion_c", 0) or 0) if batch_row else 0
     thermal_hours = float(batch_row.get("cumulative_thermal_exposure", 0) or 0) if batch_row else 0
 
-    if pct < 15 or peak_excursion > 8:
+    # Two per-product signals — no hardcoded absolute-hour thresholds.
+    # nominal_fraction is a product-relative safety floor (5% of nominal quarantines,
+    # 10% of nominal discounts) — so a 24h-remaining hard cheese isn't treated the
+    # same as a 24h-remaining bag of berries.
+    # health_ratio compares Aayu's prediction to what the label promises — 1.0 means
+    # Aayu agrees, < 1.0 means cold-chain wear.
+    nominal_fraction = (predicted / nominal) if nominal else 0
+    if printed_remaining is not None and printed_remaining > 0:
+        health_ratio = predicted / printed_remaining
+    else:
+        health_ratio = 0.0
+
+    if peak_excursion > 8 or nominal_fraction < 0.05 or health_ratio < 0.3:
         action = "Quarantine"
-    elif peak_excursion > 5 and pct > 30:
-        action = "Inspect"
-    elif pct < 30:
+    elif nominal_fraction < 0.10 or health_ratio < 0.6:
         action = "Discount"
-    elif pct < 60:
+    elif peak_excursion > 5:
+        action = "Inspect"
+    elif health_ratio < 0.9:
         action = "Prioritize Sale"
     else:
         action = "Sell Normally"

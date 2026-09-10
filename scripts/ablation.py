@@ -45,26 +45,30 @@ DEFAULT_API = "https://aayu-api-241157484581.us-central1.run.app"
 
 
 def _rules_only_decision(batch_row: dict) -> str:
-    """Config A: no ML at all. Decide from raw exposure + label-based expiry."""
+    """Config A: no ML at all. Decide from raw exposure + label-based expiry.
+    Rules-only: health_ratio = 1.0 by construction (predicted = printed), so the
+    decision reduces to nominal_fraction floor + excursion overrides."""
     nominal = float(batch_row["nominal_shelf_life_hours"])
     age = float(batch_row["age_hours_at_retail"])
     printed_remaining = max(nominal - age, 0)
-    pct = (printed_remaining / nominal * 100) if nominal else 0
     peak = float(batch_row.get("max_temp_excursion_c", 0) or 0)
+    nominal_fraction = (printed_remaining / nominal) if nominal else 0
 
-    if pct < 15 or peak > 8:
+    if peak > 8 or nominal_fraction < 0.05:
         return "Quarantine"
-    if peak > 5 and pct > 30:
-        return "Inspect"
-    if pct < 30:
+    if nominal_fraction < 0.10:
         return "Discount"
-    if pct < 60:
-        return "Prioritize Sale"
+    if peak > 5:
+        return "Inspect"
+    # health_ratio is 1.0 by construction for rules-only, so we never hit
+    # Prioritize/Discount from that path; anything with a healthy label AND
+    # no damage sells normally.
     return "Sell Normally"
 
 
 def _bqml_plus_rules_decision(batch_id: str, batch_row: dict) -> tuple[str, float]:
-    """Config B: BQML prediction fed into the same rule thresholds."""
+    """Config B: BQML prediction fed into per-product ratio rules.
+    Same threshold logic as production _rule_based_decision."""
     sql = """
     SELECT ROUND(pred.predicted_remaining_life_hours_at_retail, 2) AS predicted
     FROM ML.PREDICT(
@@ -82,16 +86,22 @@ def _bqml_plus_rules_decision(batch_id: str, batch_row: dict) -> tuple[str, floa
     )
     predicted = float(rows[0]["predicted"])
     nominal = float(batch_row["nominal_shelf_life_hours"])
-    pct = (predicted / nominal * 100) if nominal else 0
+    age = float(batch_row["age_hours_at_retail"])
+    printed_remaining = max(nominal - age, 0)
     peak = float(batch_row.get("max_temp_excursion_c", 0) or 0)
 
-    if pct < 15 or peak > 8:
+    # Clamp predicted to printed for parity with production API.
+    predicted_clamped = min(predicted, printed_remaining) if printed_remaining > 0 else predicted
+    nominal_fraction = (predicted_clamped / nominal) if nominal else 0
+    health_ratio = (predicted_clamped / printed_remaining) if printed_remaining > 0 else 0.0
+
+    if peak > 8 or nominal_fraction < 0.05 or health_ratio < 0.3:
         return "Quarantine", predicted
-    if peak > 5 and pct > 30:
-        return "Inspect", predicted
-    if pct < 30:
+    if nominal_fraction < 0.10 or health_ratio < 0.6:
         return "Discount", predicted
-    if pct < 60:
+    if peak > 5:
+        return "Inspect", predicted
+    if health_ratio < 0.9:
         return "Prioritize Sale", predicted
     return "Sell Normally", predicted
 

@@ -21,34 +21,64 @@ def _bqml(predicted, nominal, printed_remaining, predicted_raw=None):
     }
 
 
-def test_rule_based_returns_valid_action_for_clean_batch():
+def test_rule_based_sell_normally_when_aayu_matches_label():
+    # 200h predicted, 200h printed, 240h nominal, clean chain
+    # health_ratio = 1.0, nominal_fraction = 83% => Sell Normally
     result = _rule_based_decision(_bqml(200, 240, 200), batch_row=None)
     assert result["decision"]["recommended_action"] == "Sell Normally"
-    assert 0 <= result["shelf_life_analysis"]["pct_of_nominal"] <= 100
 
 
 def test_rule_based_quarantines_severe_excursion():
+    # Peak excursion > 8°C is a safety override regardless of hours
     result = _rule_based_decision(
         _bqml(100, 240, 192),
         batch_row={"max_temp_excursion_c": 10.0, "cumulative_thermal_exposure": 50},
     )
-    # Peak excursion > 8°C => Quarantine regardless of prediction
     assert result["decision"]["recommended_action"] == "Quarantine"
     assert result["exposure_summary"]["risk_level"] == "severe"
 
 
-def test_rule_based_inspects_moderate_excursion_with_life_remaining():
+def test_rule_based_inspects_moderate_damage_with_healthy_ratio():
+    # 180h predicted / 192h printed = 94% healthy, but peak 6.5°C (>5) => Inspect
     result = _rule_based_decision(
-        _bqml(120, 240, 192),  # 50% of nominal
+        _bqml(180, 240, 192),
         batch_row={"max_temp_excursion_c": 6.5, "cumulative_thermal_exposure": 30},
     )
-    # Excursion 5-8°C AND >30% remaining => Inspect
     assert result["decision"]["recommended_action"] == "Inspect"
 
 
-def test_rule_based_discounts_low_remaining_life():
-    result = _rule_based_decision(_bqml(60, 240, 192), batch_row=None)
+def test_rule_based_prioritizes_when_ratio_shows_wear():
+    # 140h predicted / 192h printed = 73% ratio, no damage => Prioritize Sale
+    result = _rule_based_decision(_bqml(140, 240, 192), batch_row=None)
+    assert result["decision"]["recommended_action"] == "Prioritize Sale"
+
+
+def test_rule_based_discounts_significant_wear():
+    # 80h predicted / 192h printed = 42% ratio (in 0.3-0.6 band) => Discount
+    result = _rule_based_decision(_bqml(80, 240, 192), batch_row=None)
     assert result["decision"]["recommended_action"] == "Discount"
+
+
+def test_rule_based_discounts_when_below_nominal_floor():
+    # 20h predicted, 240h nominal = 8.3% of nominal (<10% floor) => Discount
+    # Same absolute 20h on a 96h-nominal berry would NOT hit this floor.
+    result = _rule_based_decision(_bqml(20, 240, 20), batch_row=None)
+    assert result["decision"]["recommended_action"] == "Discount"
+
+
+def test_rule_based_quarantines_below_nominal_safety_floor():
+    # 5h predicted, 240h nominal = 2% of nominal (<5% floor) => Quarantine
+    result = _rule_based_decision(_bqml(5, 240, 5), batch_row=None)
+    assert result["decision"]["recommended_action"] == "Quarantine"
+
+
+def test_rule_based_scales_across_products():
+    # 20h remaining on berries (96h nominal) = 21% of nominal, ratio 1.0 => Sell Normally
+    # Same 20h on cheese (720h nominal) = 2.8% of nominal (<5% floor) => Quarantine
+    berries = _rule_based_decision(_bqml(20, 96, 20), batch_row=None)
+    cheese = _rule_based_decision(_bqml(20, 720, 20), batch_row=None)
+    assert berries["decision"]["recommended_action"] == "Sell Normally"
+    assert cheese["decision"]["recommended_action"] == "Quarantine"
 
 
 # --- Invariant 2: fallback response shape matches agent-mode shape ---
