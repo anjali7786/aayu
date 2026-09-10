@@ -34,6 +34,10 @@ tools:
         hours_above_humidity_max,
         max_temp_excursion_c,
         longest_excursion_hours,
+        thermal_x_time,
+        excursion_squared,
+        thermal_x_transit,
+        printed_remaining_life_hours,
         remaining_life_hours_at_retail
       FROM `aayu-506916.aayu.v_batch_features`
       WHERE batch_id = @batch_id

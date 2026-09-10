@@ -3,174 +3,214 @@
 AI-powered estimation of *effective* remaining shelf life for perishable food,
 based on the product's real cold-chain journey — not just the date printed on the pack.
 
-Built for **Patchamomma 2026** (Google Cloud hackathon).
+---
+
+## The problem
+
+Every year, roughly **one-third of all food produced globally is wasted** — about $1T in losses. A large share is perishable food that expires prematurely because the *printed* shelf life assumes ideal storage, while real cold chains have gaps: transit delays, warehouse temperature excursions, retail floor mishandling.
+
+Two batches of pasteurized milk with the same "expires Aug 15" stamp can have wildly different real freshness by the time they hit the shelf. Retailers, wholesalers, and 3PLs currently have no way to know. They discard or sell based on the label, not on reality.
+
+## The idea
+
+Aayu combines cold-chain telemetry, product characteristics, and Gemini reasoning to compute a **Dynamic Shelf-Life Score** per batch and recommend the next best operational action — Sell Normally, Prioritize Sale, Discount, Inspect, or Quarantine.
+
+## What it does
+
+1. **Ingest** synthetic cold-chain telemetry (temperature + humidity, 15-min intervals) for 500 batches across 10 SKUs.
+2. **Store** in BigQuery with a feature view (`v_batch_features`) that aggregates damage signals.
+3. **Predict** remaining shelf life with a BigQuery ML linear regression (MAE **9.24h**, R² **0.985**).
+4. **Analyze** via a Google ADK 3-agent orchestrator (Exposure Analyst → Shelf-Life Analyst → Decision Agent), backed by an MCP Toolbox exposing BQ read tools.
+5. **Serve** via FastAPI on Cloud Run with a React frontend generated in AI Studio Build.
+6. **Scan** real GS1-128 barcodes and GS1 Digital Link URLs — production-grade identifier handling, not fake barcodes.
+
+## Live demo
+
+- **Frontend**: *(add URL)*
+- **Backend API**: `https://aayu-api-241157484581.us-central1.run.app`
+- **MCP Toolbox**: `https://aayu-mcp-toolbox-241157484581.us-central1.run.app`
+
+Try it:
+```bash
+curl -X POST https://aayu-api-241157484581.us-central1.run.app/batches/b_0001/assessment | jq .
+```
 
 ---
 
-## The idea in one line
+## Architecture
 
-Two products with the same printed expiry date can have very different real freshness.
-Aayu combines cold-chain telemetry, product characteristics and Gemini reasoning to
-estimate a Dynamic Shelf-Life Score and recommend the next best operational action.
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                            React + Vite (Cloud Run)                        │
+│  Landing · Batch List · Batch Detail · Compare · Scan QR                   │
+└──────────────────────────────┬─────────────────────────────────────────────┘
+                               │  HTTPS
+                               ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                        FastAPI (Cloud Run, 2Gi / 300s)                     │
+│  /batches  /batches/{id}  /batches/{id}/assessment  /barcode/lookup        │
+│                                                                            │
+│  ┌────────────────────────────┐    ┌────────────────────────────────────┐ │
+│  │  ADK Sequential Agent      │    │  _bqml_prediction  (source of truth)│ │
+│  │  Exposure → Shelf-Life →   │    │  ML.PREDICT  +  interval calibration │ │
+│  │  Decision                  │    │  Clamps predicted ≤ printed expiry  │ │
+│  └──────────┬─────────────────┘    └────────────────┬───────────────────┘ │
+│             │ tool calls                            │                      │
+│             ▼                                       ▼                      │
+└─────────────┼───────────────────────────────────────┼──────────────────────┘
+              │                                       │
+              ▼                                       ▼
+┌──────────────────────────────┐        ┌─────────────────────────────────┐
+│  MCP Toolbox (Cloud Run)      │        │  BigQuery                        │
+│  Google MCP Toolbox v1.10.0   │        │  aayu.telemetry (raw sensors)    │
+│  get-batch-features           │───────▶│  aayu.events (journey milestones)│
+│  get-batch-telemetry-summary  │        │  aayu.products (SKU + GS1)       │
+│  get-batch-events             │        │  aayu.v_batch_features (view)    │
+│  predict-shelf-life           │        │  aayu.shelf_life_linear (BQML)   │
+│  lookup-batch-by-*            │        │  aayu.shelf_life_boosted_tree   │
+└──────────────────────────────┘        │  aayu.model_calibration          │
+                                        └─────────────────────────────────┘
 
-## Example
+                    Decision audit → Firestore (Native)
+                    Numeric integrity → server-side clamp + prediction intervals
+```
 
-| | Batch A | Batch B |
-|---|---|---|
-| Printed expiry | 4 days remaining | 4 days remaining |
-| Journey | Stable refrigeration | Delay + temperature excursion |
-| Aayu estimate | Higher remaining life | Lower remaining life |
-| Recommended action | Sell normally | Prioritize sale or inspect |
+**Design principles**
+- **Single source of truth** for numeric prediction. LLMs generate narrative; BQML generates numbers. The API overrides any agent-generated number with a direct `ML.PREDICT` call so the operator sees what the model actually said.
+- **Server-side product invariants.** Aayu never claims more shelf life than the printed label — clamp lives in the API, not the UI, so partner integrations get the same guarantee.
+- **Graceful degradation.** If MCP or Vertex is down, the endpoint falls back to a deterministic rule-based decision from BQML output. `/assessment` never returns 500 because an LLM died. Response includes `mode: "agent" | "rule_based_fallback"` so the caller knows.
+- **Calibrated confidence.** Every prediction ships with an empirical 80% interval calibrated from held-out residuals, not a false-precision point estimate.
 
----
+## Model quality
 
-## Stack (planned)
+Trained on 500 batches × 10 SKUs of synthetic cold-chain data with per-product damage coefficients grounded in food-science literature (Arrhenius-like thermal decay, humidity thresholds per USDA guidelines).
 
-| Layer | Tool |
+| Model | MAE (h) | R² | Median abs error (h) | Notes |
+|---|---:|---:|---:|---|
+| **shelf_life_linear** (production) | **9.24** | **0.985** | **5.5** | Interaction features (`thermal × time`, `excursion²`, `thermal × transit`); L2 regularization |
+| shelf_life_boosted_tree (challenger) | 33.4 | 0.898 | 33.1 | Overfits at 500-batch scale; kept for when real data volume arrives |
+
+**80% empirical prediction interval: ±12.11h**  |  **90%: ±18.03h** (from residuals on training set)
+
+**Top 5 features by importance** (boosted tree feature importance as a proxy):
+1. `age_h` (weight 197) — time since manufacture dominates
+2. `nominal_h` (133) — product-specific baseline shelf life
+3. `cum_therm` (56) — cumulative thermal exposure
+4. `long_exc_h` (31) — longest continuous excursion
+5. `thermal_x_time_s` (24) — the interaction feature earns its place
+
+See [`docs/ABLATION.md`](docs/ABLATION.md) for the head-to-head comparison of rule-only vs. BQML+rule vs. full agent stack across 20 sample batches.
+
+## Google Cloud services used
+
+| Service | Role |
 |---|---|
-| Language | Python 3.14 |
-| Streaming ingest | Cloud Pub/Sub |
-| Data store | BigQuery |
-| ML | BigQuery ML |
-| Managed AI | Vertex AI |
-| LLM | Gemini via `google-genai` (Vertex path) |
-| Agentic | Google ADK |
-| App state | Firestore |
-| UI | Streamlit + Plotly |
-| Deploy | Cloud Run |
-| Reporting | Looker Studio |
-| Secrets | Secret Manager |
+| BigQuery | Telemetry + events store, feature view, model calibration table |
+| BigQuery ML | Linear + boosted-tree regressors, `ML.PREDICT` for serving |
+| Vertex AI | Gemini 2.5 Flash for agent narrative and decision synthesis |
+| Google ADK | 3-agent orchestrator (`SequentialAgent`) |
+| MCP Toolbox for Databases | Exposes BQ read + ML predict as MCP tools |
+| Cloud Run | Backend, MCP, and frontend hosting |
+| Firestore | Decision audit log (Native mode) |
+| Cloud Build | Auto-triggered image builds on `gcloud run deploy --source` |
+
+## Application stack
+
+Beyond the Google Cloud services above, the application layer uses:
+
+- **Backend** — Python 3.14 · FastAPI · Google ADK (`SequentialAgent`) · MCP Toolbox for Databases (v1.10.0)
+- **Frontend** — React 18 · Vite · TypeScript · Tailwind · Recharts · TanStack Query · `html5-qrcode` (camera scan) · `qrcode.react` (rendered GS1 codes)
+- **Standards** — GS1-128 element strings `(01)…(10)…(17)…` and GS1 Digital Link URLs `/01/{gtin}/10/{lot}/17/{expiry}` — the same formats used in real retail supply chains, not synthetic identifiers
 
 ---
 
-## Progress so far
+## Repository layout
 
-- GCP project set up (`aayu-506916`), all required APIs enabled, Firestore database created in Native mode.
-- Service account (`aayu-dev`) with Editor + Secret Manager Admin roles; JSON key generated.
-- Python 3.14 virtual environment with all SDKs installed (BigQuery, Vertex AI, Firestore, Pub/Sub, ADK, Streamlit).
-- Corporate SSL proxy (Zscaler) worked around using `truststore` + custom CA bundle for gRPC.
-- End-to-end sanity check (`hello.py`) confirms BigQuery, Gemini via Vertex AI, and Firestore are all reachable from Python.
-
-## Not yet built
-
-Data generator, BigQuery tables, features view, BQML model, Pub/Sub replay, ADK agents, Streamlit UI, Cloud Run deploy, Looker dashboard.
+```
+aayu/
+├── data/                    # Synthetic generator + BigQuery loaders
+│   ├── generate_data.py     # 500 batches, 10 SKUs, per-product damage coeffs
+│   ├── load_data.py         # BQ table + view creation
+│   └── queries/features.sql # v_batch_features view (interaction features baked in)
+├── model/                   # BQML training + calibration
+│   ├── train.py
+│   └── queries/
+│       ├── training.sql
+│       ├── training_linear.sql
+│       ├── save_prediction_interval.sql
+│       └── feature_importance.sql
+├── mcp/                     # MCP Toolbox config
+│   ├── tools.yaml           # 6 tools exposed to the agent
+│   └── Dockerfile
+├── agents/                  # ADK orchestrator
+│   └── orchestrator.py      # Exposure → Shelf-Life → Decision (SequentialAgent)
+├── api/                     # FastAPI backend
+│   └── main.py              # Endpoints + BQML override + rule-based fallback
+├── scripts/                 # Ablation study, one-off scripts
+│   └── ablation.py
+├── tests/                   # Fast pytest suite (no BQ/Vertex needed)
+│   └── test_invariants.py
+├── aayu-fe/                 # React frontend (generated via AI Studio Build)
+├── docs/
+│   ├── BUSINESS_CASE.md
+│   └── ABLATION.md
+├── Dockerfile               # Backend container (Python 3.14 slim)
+└── README.md
+```
 
 ---
 
-## Local setup
+## Running it end-to-end
 
 Prerequisites:
 - Python 3.10+ (3.14 tested)
-- GCP project with billing enabled
-- Service-account JSON key with Editor + Secret Manager Admin roles
+- GCP project with BigQuery, Vertex AI, Firestore, Cloud Run APIs enabled
+- Service account with `bigquery.admin`, `aiplatform.user`, `datastore.user`, `run.developer`
+
+### 1. Seed data + train models (in Cloud Shell)
 
 ```bash
-git clone git@github.com:anjali7786/aayu.git
+git clone https://github.com/anjali7786/aayu.git
 cd aayu
-
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Create .env (never commit — it's in .gitignore)
-cat > .env << 'EOF'
-GEMINI_API_KEY=<optional-aistudio-key>
-GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/gcp-key.json
-GCP_PROJECT_ID=<your-project-id>
-GCP_REGION=us-central1
-EOF
+# Seed BigQuery
+python -m data.generate_data
+python -m data.load_data
 
-python hello.py
+# Build view + train both models + compute prediction intervals
+bq query --use_legacy_sql=false < data/queries/features.sql
+python -m model.train
 ```
 
-Expected:
-```
-BigQuery: 1
-Gemini (Vertex): Hi there! ...
-Firestore: {'msg': 'hi from aayu'}
-```
-
-### Corporate SSL proxies (Zscaler, Netskope)
-
-If you hit `SSLCertVerificationError`:
+### 2. Deploy MCP + backend
 
 ```bash
-pip install truststore
+# MCP Toolbox
+gcloud run deploy aayu-mcp-toolbox --source ./mcp --region us-central1 --allow-unauthenticated
+
+# FastAPI backend (needs AAYU_MCP_URL pointing at the MCP service)
+gcloud run deploy aayu-api \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --memory 2Gi \
+  --timeout 300 \
+  --min-instances 1 \
+  --set-env-vars "AAYU_MCP_URL=https://aayu-mcp-toolbox-241157484581.us-central1.run.app/mcp,GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=$(gcloud config get-value project),GOOGLE_CLOUD_LOCATION=us-central1"
 ```
 
-`hello.py` calls `truststore.inject_into_ssl()` at the top, delegating cert
-verification to the OS keychain (which already trusts your corporate proxy).
-
-For gRPC (BigQuery, Firestore), also point `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`
-at a combined CA bundle:
+### 3. Run tests
 
 ```bash
-security find-certificate -a -c "Zscaler" -p /Library/Keychains/System.keychain > /tmp/zscaler.pem
-CERTIFI=$(python -c "import certifi; print(certifi.where())")
-mkdir -p ~/.certs
-cat "$CERTIFI" /tmp/zscaler.pem > ~/.certs/combined-ca.pem
-export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=~/.certs/combined-ca.pem
+pytest tests/ -v
 ```
 
-Add the export to `~/.zshrc` to persist.
-
-### Committing from a corporate machine with personal identity
-
-If you're on a work laptop whose global git identity is a company email, set a
-**repo-local** identity so this project's commits stay attached to your personal
-GitHub account without touching your work repos.
+### 4. Run the ablation study
 
 ```bash
-cd aayu
-
-# Repo-scoped — no --global flag
-git config user.name "Your Name"
-git config user.email "your-personal-email@example.com"
-
-# Verify: repo shows personal, global stays as company
-git config user.email          # → personal
-git config --global user.email # → company (leave untouched)
+python -m scripts.ablation --n 20 --output docs/ABLATION.md
 ```
 
-Every commit made from this folder will now be authored by your personal
-identity. Verify after each commit:
-
-```bash
-git commit -m "..."
-git log -1 --format="%an <%ae>"   # must show personal email
-```
-
-If a commit slipped through with the wrong identity, amend it before pushing:
-
-```bash
-git commit --amend --author="Your Name <your-personal-email@example.com>" --no-edit
-```
-
-Also use SSH (not HTTPS) so commits push under a personal SSH key uploaded to
-your personal GitHub account:
-
-```bash
-# Generate a project-specific key
-ssh-keygen -t ed25519 -C "your-personal-email@example.com" -f ~/.ssh/github_personal -N ""
-
-# Tell SSH to use this key for github.com only
-cat >> ~/.ssh/config << 'EOF'
-
-Host github.com
-  User git
-  IdentityFile ~/.ssh/github_personal
-  IdentitiesOnly yes
-EOF
-chmod 600 ~/.ssh/config
-
-# Upload ~/.ssh/github_personal.pub at https://github.com/settings/keys
-# Then verify:
-ssh -T git@github.com   # → "Hi <your-username>! ..."
-```
-
-Always sanity-check before staging on a corporate machine:
-
-```bash
-git status                                          # look for accidental Intuit/company files
-git diff --cached --name-only | grep -E "\.env$|gcp-key" && echo STOP || echo clean
-```
+Takes ~2 min. Regenerates `docs/ABLATION.md` with a fresh comparison table.
